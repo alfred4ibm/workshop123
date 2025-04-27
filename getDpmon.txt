@@ -1,0 +1,151 @@
+#!/bin/bash
+#set -x
+# *********************************************************************
+# *                                                                   *
+# * ? Copyright IBM Corp. 2020                                        *
+# *                                                                   *
+# *********************************************************************
+#
+#
+#	Usage:
+#     1) create a password file: A text file that contains only the password.
+#     2) chmod 600 <password_file>
+#     3) ./dpmon.sh <hostname> <admin_uid> <password_file>
+#
+#
+# The script will create an output directory ,list DPmon files, fetch all dpmon files, convert base64 into ASCII, save file
+############################################
+# 20191202  Security Performance
+# Generated initial version
+#############################################
+
+printUsage() {
+    echo "Usage:"
+    echo "  1) Create a password file. This is a text file that contains only"
+    echo "     the password"
+    echo "  2) Secure the password file with the following command:"
+    echo "     chmod 600 <password_file>"
+    echo "  3) ./getDpmon.sh <hostname> <admin_uid> <password_file>"
+    echo ""
+    echo "Alternatively, parameters may be provided by setting the following"
+    echo "evironment variables:"
+    echo "  DPHOST - datapower hostname"
+    echo "  uID - datapower admin user id"
+    echo "  password - the datapower admin password"
+    echo "  passwordFile - a file containing the datapower admin password. Ignored"
+    echo "      if the 'password' environment variable is provided"
+}
+
+## Edit next lines for each environment
+## Hostname or ip address of the DataPower device
+if [ -z "${DPHOST}" ]; then
+    DPHOST=$1
+    shift
+fi
+
+## adminID
+if [ -z "${uID}" ]; then
+    uID=$1
+    shift
+fi
+
+## password
+if [ -z "${password}" ]; then
+    if [ -z "${passwordFile}" ]; then
+        passwordFile=$1
+        shift
+    fi
+    if [ -z "${passwordFile}" ]; then
+        echo "Needs a password file"
+        printUsage
+        exit 1
+    fi
+    if [ ! -e "${passwordFile}" ]; then
+        echo "Password file does not exist"
+        printUsage
+        exit 1
+    fi
+    password=$(cat $passwordFile)
+fi
+
+
+echo $0 on $DPHOST as $uID
+
+####################################################
+
+# Repeat every two hours. Do not change this. The gateway retains a little over
+# two hours of data and each cycle collects it all. Reducing this cycle time
+# does not collect any additional data; it only creates more overlap in the data
+# collected with each cycle.
+sleep_time=7200
+
+fetchFiles() {
+    count=0
+    max_count=8
+    timestamp=`date +%Y%m%d%H%M%S`
+    b64_file=${timestamp}
+    converted_file=${b64_file}
+    converted_files=()
+
+    while [[ $count -le $max_count ]]; do
+        #echo ${count}
+
+        if [ "${count}" -lt "1" ]; then
+            echo "<env:Envelope xmlns:env=\"http://schemas.xmlsoap.org/soap/envelope/\"><env:Body><dp:request xmlns:dp=\"http://www.datapower.com/schemas/management\"><dp:get-file name=\"temporary:///dpmon/dpmon\"/></dp:request></env:Body></env:Envelope>" > myxml
+        else
+            echo "<env:Envelope xmlns:env=\"http://schemas.xmlsoap.org/soap/envelope/\"><env:Body><dp:request xmlns:dp=\"http://www.datapower.com/schemas/management\"><dp:get-file name=\"temporary:///dpmon/dpmon.${count}\"/></dp:request></env:Body></env:Envelope>" > myxml
+        fi
+
+        local root=${datadir}${DPHOST}_${converted_file}_$count
+        local nmon=${root}.nmon
+        local xml=${root}.xml
+        local b64=${root}.b64
+
+        echo
+        echo "Fetching file $xml"
+
+        curl -k --user ${uID}:${password} -d @myxml 'https://'${DPHOST}':5550/mgmt' > $xml
+
+        echo -n "Converting file..."
+
+        cat $xml | sed -n 's/.*<dp:file name="[^\"]*">\([0-9A-Za-z+\/]*=*\).*/\1/p' > $b64
+
+        base64 -d $b64 > $nmon
+        converted_files+=($nmon)
+        echo " done"
+
+        rm -f $xml $b64
+        (( count += 1 ))
+    done
+
+    echo
+    echo Prepared files:
+
+    for i in ${converted_files[@]}; do
+        echo '  '${i}
+    done
+}
+
+#time=$(( $(date +%s) + duration ))
+#while [ $(date +%s) -lt $time ]; do
+while (true); do
+    current_time=`date +%s`
+    target_time=`expr $current_time + $sleep_time`
+    echo
+    echo "Target Time is: " $target_time
+    datestamp=`date +%Y%m%dT%H%M%S`
+    datadir=output/${datestamp}/
+    mkdir -p ${datadir}
+    #listFiles
+    fetchFiles
+    #after work is done, reevaluate currtnt time
+    current_time=`date +%s`
+    if [[ $target_time -gt $current_time ]]; then
+        #cur_sleep=`expr $target_time + $sleep_time - $current_time`
+        cur_sleep=`expr  $target_time - $current_time`
+        echo "Sleeping for" $cur_sleep
+        sleep $cur_sleep
+    else
+        echo "Not sleeping yet. Current Sleep value is: " $cur_sleep
+    fi
+done
